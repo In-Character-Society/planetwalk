@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PLANETWALK [ALPHA BUILD 2313.8]</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Post-processing scripts for CRT effects -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+    <!-- Simplex Noise for terrain generation -->
+    <script src="https://cdn.jsdelivr.net/npm/simplex-noise@2.4.0/simplex-noise.min.js"></script>
+    
+    <style>
+        @font-face {
+            font-family: 'Alien-Encounters';
+            src: url('https://dl.dropboxusercontent.com/s/4s22g56h05a41xn/Alien-Encounters-Regular.woff?dl=0') format('woff');
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #0f0;
+            font-family: 'Alien-Encounters', 'VT323', monospace;
+            cursor: none;
+        }
+        canvas {
+            display: block;
+        }
+        #main-menu {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+            text-align: center;
+            cursor: pointer;
+            text-transform: uppercase;
+        }
+        #title {
+            font-family: 'Alien-Encounters', 'VT323', monospace;
+            font-size: 10vw;
+            text-shadow: 0 0 15px #0f0, 0 0 25px #0f0;
+            animation: flicker 1.5s infinite alternate;
+            margin: 0;
+            padding: 0;
+            line-height: 1;
+        }
+        #author-info {
+            font-family: 'Alien-Encounters', 'VT323', monospace;
+            font-size: 2vw;
+            margin-top: 25px;
+            color: #0c0;
+            letter-spacing: 3px;
+            text-shadow: 0 0 5px #0c0;
+        }
+        #start-prompt {
+             font-family: 'Alien-Encounters', 'VT323', monospace;
+            font-size: 2.5vw;
+            margin-top: 10vh;
+            color: #0f0;
+            text-shadow: 0 0 10px #0f0;
+            animation: pulse 2s infinite;
+        }
+       
+        .scanlines-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            background: repeating-linear-gradient(
+                to bottom,
+                rgba(0, 0, 0, 0),
+                rgba(0, 0, 0, 0) 1px,
+                rgba(0, 24, 0, 0.4) 2px,
+                rgba(0, 24, 0, 0.4) 3px
+            );
+            z-index: 100;
+        }
+
+        @keyframes flicker {
+            0%, 100% { opacity: 1; text-shadow: 0 0 10px #0f0, 0 0 20px #0f0; }
+            50% { opacity: 0.85; text-shadow: 0 0 5px #0f0, 0 0 15px #0f0; }
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+    </style>
+</head>
+<body>
+    <div id="main-menu">
+        <h1 id="title">PLANETWALK</h1>
+        <p id="author-info">MASHIR IRR'SUT // 2313</p>
+        <p id="start-prompt">[ КЛИКНИТЕ ДЛЯ НАЧАЛА ]</p>
+    </div>
+
+    <div class="scanlines-overlay"></div>
+
+    <script>
+        // --- BASIC SETUP ---
+        const mainMenu = document.getElementById('main-menu');
+
+        let scene, camera, renderer, player, composer, ground, raycaster;
+        let snowParticles, lightningLight, cloudPlane;
+        
+        // --- PLAYER STATE ---
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        const playerVelocity = new THREE.Vector3();
+        const playerSpeed = 15.0;
+        const playerHeight = 2.0;
+        const gravity = 30.0;
+        const jumpHeight = 10.0;
+
+        mainMenu.addEventListener('click', () => {
+            mainMenu.style.transition = 'opacity 1s';
+            mainMenu.style.opacity = '0';
+            setTimeout(() => {
+                mainMenu.style.display = 'none';
+                init();
+                animate();
+                document.body.requestPointerLock();
+            }, 1000);
+        });
+
+        function init() {
+            // --- SCENE & RENDERER ---
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0f0a);
+            scene.fog = new THREE.Fog(0x0a0f0a, 1, 250); // Volumetric-like fog
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setPixelRatio(window.devicePixelRatio / 1.5);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            // --- CAMERA & PLAYER ---
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            player = new THREE.Group();
+            player.position.set(0, 30, 0); // Start slightly above ground
+            player.add(camera);
+            scene.add(player);
+            
+            raycaster = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0), 0, playerHeight + 0.2);
+
+            // --- GROUND WITH PROCEDURAL SNOW SHADER & DISPLACEMENT ---
+            const groundGeometry = new THREE.PlaneGeometry(5000, 5000, 200, 200);
+            const simplex = new SimplexNoise();
+            const vertices = groundGeometry.attributes.position;
+            for (let i = 0; i < vertices.count; i++) {
+                const vertex = new THREE.Vector3().fromBufferAttribute(vertices, i);
+                let height = simplex.noise2D(vertex.x / 300, vertex.y / 300) * 15;
+                height += simplex.noise2D(vertex.x / 80, vertex.y / 80) * 4;
+                vertices.setZ(i, height);
+            }
+            groundGeometry.computeVertexNormals();
+
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            groundMaterial.onBeforeCompile = (shader) => {
+                shader.uniforms.time = { value: 0 };
+                shader.vertexShader = 'varying vec3 vWorldPosition;\n' + shader.vertexShader;
+                shader.vertexShader = shader.vertexShader.replace('#include <worldpos_vertex>', `#include <worldpos_vertex>\nvWorldPosition = worldPosition.xyz;`);
+                shader.fragmentShader = `
+                    uniform float time; varying vec3 vWorldPosition;
+                    vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+                    vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+                    vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+                    float snoise(vec2 v) { const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439); vec2 i = floor(v + dot(v, C.yy)); vec2 x0 = v - i + dot(i, C.xx); vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0); vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1; i = mod289(i); vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 )) + i.x + vec3(0.0, i1.x, 1.0 )); vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0); m = m*m; m = m*m; vec3 x = 2.0 * fract(p * C.www) - 1.0; vec3 h = abs(x) - 0.5; vec3 ox = floor(x + 0.5); vec3 a0 = x - ox; m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h ); vec3 g; g.x = a0.x * x0.x + h.x * x0.y; g.yz = a0.yz * x12.xz + h.yz * x12.yw; return 130.0 * dot(m, g); }
+                ` + shader.fragmentShader;
+                shader.fragmentShader = shader.fragmentShader.replace(
+                    'vec4 diffuseColor = vec4( diffuse, opacity );',
+                    ` float scale = 0.1; float noise1 = (snoise(vWorldPosition.xz * scale) + 1.0) * 0.5; float noise2 = (snoise(vWorldPosition.xz * scale * 4.0) + 1.0) * 0.5; float noise = noise1 * 0.7 + noise2 * 0.3; vec3 snowColor = mix(vec3(0.2, 0.3, 0.2), vec3(0.6, 0.8, 0.6), noise); vec4 diffuseColor = vec4( diffuse * snowColor, opacity ); `
+                );
+                groundMaterial.userData.shader = shader;
+            };
+            ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // --- LIGHTING OVERHAUL ---
+            scene.add(new THREE.AmbientLight(0x405040, 1.2));
+            const sunLight = new THREE.DirectionalLight(0xa0b0a0, 2.0);
+            sunLight.position.set(100, 150, 100);
+            sunLight.castShadow = true;
+            sunLight.shadow.mapSize.width = 1024;
+            sunLight.shadow.mapSize.height = 1024;
+            sunLight.shadow.camera.near = 50; sunLight.shadow.camera.far = 500;
+            sunLight.shadow.camera.left = -200; sunLight.shadow.camera.right = 200;
+            sunLight.shadow.camera.top = 200; sunLight.shadow.camera.bottom = -200;
+            scene.add(sunLight);
+            
+            lightningLight = new THREE.PointLight(0xd0e0d0, 0, 800, 2.0);
+            scene.add(lightningLight);
+            
+            // --- VOLUMETRIC-LIKE CLOUDS ---
+            const cloudGeometry = new THREE.PlaneGeometry(5000, 5000);
+            const cloudMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0.0 },
+                    lightning: { value: 0.0 },
+                    fogColor: { value: scene.fog.color },
+                    fogNear: { value: scene.fog.near },
+                    fogFar: { value: scene.fog.far }
+                },
+                vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+                fragmentShader: `
+                    uniform float time; uniform float lightning; varying vec2 vUv;
+                    float random(vec2 st) { return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123); }
+                    float noise(vec2 st) { vec2 i = floor(st); vec2 f = fract(st); vec2 u = f*f*(3.0-2.0*f); return mix(mix(random(i + vec2(0.0,0.0)), random(i + vec2(1.0,0.0)), u.x), mix(random(i + vec2(0.0,1.0)), random(i + vec2(1.0,1.0)), u.x), u.y); }
+                    float fbm(vec2 st) { float value = 0.0; float amplitude = .5; float frequency = 0.; for (int i = 0; i < 6; i++) { value += amplitude * noise(st); st *= 2.; amplitude *= .5; } return value; }
+                    void main() { 
+                        vec2 p = vUv * 5.0 + vec2(0.0, -time * 0.05);
+                        float cloud = fbm(p);
+                        float density = smoothstep(0.4, 0.7, cloud);
+                        vec3 baseColor = vec3(0.05, 0.08, 0.05);
+                        vec3 flashColor = vec3(0.8, 1.0, 0.8);
+                        vec3 finalColor = mix(baseColor, flashColor, lightning);
+                        gl_FragColor = vec4(finalColor, density * 0.9); 
+                    }
+                `,
+                transparent: true, blending: THREE.NormalBlending, depthWrite: false, fog: true
+            });
+            cloudPlane = new THREE.Mesh(cloudGeometry, cloudMaterial);
+            cloudPlane.position.y = 150;
+            cloudPlane.rotation.x = Math.PI / 2;
+            scene.add(cloudPlane);
+
+            // --- SNOW PARTICLE SYSTEM ---
+            const snowCount = 40000;
+            const snowGeometry = new THREE.BufferGeometry();
+            const positions = [];
+            for (let i = 0; i < snowCount; i++) { positions.push((Math.random() - 0.5) * 400, Math.random() * 200, (Math.random() - 0.5) * 400); }
+            snowGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            const snowMaterial = new THREE.PointsMaterial({ color: 0x2c5d2c, size: 0.3, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending });
+            snowParticles = new THREE.Points(snowGeometry, snowMaterial);
+            scene.add(snowParticles);
+
+            // --- POST-PROCESSING (CRT EFFECT) ---
+            composer = new THREE.EffectComposer(renderer);
+            composer.addPass(new THREE.RenderPass(scene, camera));
+            const crtShader = {
+                uniforms: { 'tDiffuse': { value: null }, 'time': { value: 0.0 }, 'resolution': { value: new THREE.Vector2() } },
+                vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+                fragmentShader: `
+                    uniform sampler2D tDiffuse; varying vec2 vUv; uniform float time; uniform vec2 resolution;
+                    float noise(vec2 co){ return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453); }
+                    void main() { vec2 offset = vec2(0.0015, 0.0); float r = texture2D(tDiffuse, vUv - offset).r; float g = texture2D(tDiffuse, vUv).g; float b = texture2D(tDiffuse, vUv + offset).b; float scanline = sin(vUv.y * resolution.y * 1.5) * 0.04; float vignette = 1.0 - length(vUv - 0.5) * 1.2; float grain = noise(vUv * time) * 0.05; vec3 color = vec3(r, g, b) * vignette - scanline + grain; gl_FragColor = vec4(color, 1.0); }`
+            };
+            const crtPass = new THREE.ShaderPass(crtShader);
+            composer.addPass(crtPass);
+
+            // --- CONTROLS & RESIZE ---
+            setupControls();
+            window.addEventListener('resize', onWindowResize, false);
+            onWindowResize();
+        }
+
+        function setupControls() {
+            const onKeyDown = (event) => {
+                switch (event.code) {
+                    case 'KeyW': moveForward = true; break;
+                    case 'KeyA': moveLeft = true; break;
+                    case 'KeyS': moveBackward = true; break;
+                    case 'KeyD': moveRight = true; break;
+                    case 'Space': if (canJump) playerVelocity.y += jumpHeight; canJump = false; break;
+                    case 'Escape': document.exitPointerLock(); break;
+                }
+            };
+            const onKeyUp = (event) => {
+                switch (event.code) {
+                    case 'KeyW': moveForward = false; break;
+                    case 'KeyA': moveLeft = false; break;
+                    case 'KeyS': moveBackward = false; break;
+                    case 'KeyD': moveRight = false; break;
+                }
+            };
+            
+            document.addEventListener('pointerlockchange', lockChangeAlert, false);
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            
+            // This event listener handles re-engaging pointer lock after alt-tabbing
+            document.addEventListener('click', () => {
+                if(mainMenu.style.display === 'none' && document.pointerLockElement !== document.body) {
+                    document.body.requestPointerLock();
+                }
+            });
+
+            function lockChangeAlert() {
+                if (document.pointerLockElement === document.body) {
+                    document.addEventListener("mousemove", updatePosition, false); document.body.style.cursor = 'none';
+                } else {
+                    document.removeEventListener("mousemove", updatePosition, false); document.body.style.cursor = 'auto';
+                    moveForward = moveBackward = moveLeft = moveRight = false;
+                }
+            }
+            function updatePosition(e) {
+                player.rotation.y -= e.movementX * 0.002;
+                camera.rotation.x -= e.movementY * 0.002;
+                camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+            }
+        }
+        
+        function createLightning() {
+            lightningLight.position.set(player.position.x + Math.random() * 200 - 100, 100, player.position.z + Math.random() * 200 - 100);
+            lightningLight.intensity = 8 + Math.random() * 8;
+            cloudPlane.material.uniforms.lightning.value = 0.8 + Math.random() * 0.4;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+            composer.passes[1].uniforms.resolution.value.set(window.innerWidth, window.innerHeight);
+        }
+
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
+            
+            // --- MOVEMENT & PHYSICS (Corrected) ---
+            playerVelocity.y -= gravity * delta;
+
+            const direction = new THREE.Vector3(
+                Number(moveRight) - Number(moveLeft),
+                0,
+                Number(moveForward) - Number(moveBackward)
+            );
+            direction.normalize();
+
+            if (moveForward || moveBackward) player.translateZ(-direction.z * playerSpeed * delta);
+            if (moveLeft || moveRight) player.translateX(direction.x * playerSpeed * delta);
+            
+            player.position.y += playerVelocity.y * delta;
+            
+            // --- GROUND COLLISION (Corrected) ---
+            raycaster.ray.origin.copy(player.position);
+            const intersections = raycaster.intersectObject(ground);
+
+            if (intersections.length > 0) {
+                const groundY = intersections[0].point.y;
+                if (player.position.y < groundY + playerHeight) {
+                    playerVelocity.y = 0;
+                    player.position.y = groundY + playerHeight;
+                    canJump = true;
+                }
+            } else {
+                canJump = false;
+            }
+
+            // --- SNOW ANIMATION (NOW FOLLOWS PLAYER) ---
+            const positions = snowParticles.geometry.attributes.position.array;
+            const playerPos = player.position;
+            const snowRange = 200;
+            for (let i = 0; i < positions.length; i += 3) {
+                positions[i + 1] -= (20 + Math.random()*10) * delta;
+                positions[i] -= (35 + Math.random()*10) * delta;
+
+                if (positions[i + 1] < playerPos.y - 50) {
+                     positions[i + 1] = playerPos.y + 100;
+                }
+                if (positions[i] < playerPos.x - snowRange) {
+                    positions[i] += snowRange * 2;
+                }
+                if (positions[i] > playerPos.x + snowRange) {
+                    positions[i] -= snowRange * 2;
+                }
+                if (positions[i + 2] < playerPos.z - snowRange) {
+                     positions[i + 2] += snowRange * 2;
+                }
+                if (positions[i + 2] > playerPos.z + snowRange) {
+                    positions[i + 2] -= snowRange * 2;
+                }
+            }
+            snowParticles.geometry.attributes.position.needsUpdate = true;
+            
+            // --- LIGHTNING & CLOUDS ---
+            if (Math.random() > 0.99) createLightning();
+            lightningLight.intensity -= 15 * delta;
+            if(cloudPlane.material.uniforms.lightning.value > 0) cloudPlane.material.uniforms.lightning.value -= 2.5 * delta;
+            cloudPlane.position.set(player.position.x, 150, player.position.z);
+            cloudPlane.material.uniforms.time.value = elapsedTime;
+            
+            // --- RENDER ---
+            composer.passes[1].uniforms.time.value = elapsedTime;
+            composer.render();
+        }
+    </script>
+</body>
+</html>
+
+
